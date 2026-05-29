@@ -1,1 +1,1 @@
-The full high-performance KaineBrain from artifacts/kaine_nuclear/kaine_brain.py
+KaineBrain v3 with improved memory retrieval and context handling
