@@ -1,1 +1,1 @@
-The full new intelligent brain module from artifacts
+The full high-performance KaineBrain from artifacts/kaine_nuclear/kaine_brain.py
