@@ -25,6 +25,9 @@ const state = {
   transcript: [],
   memories: [],
   missions: [],
+  actions: [],
+  actionLog: [],
+  lastAction: null,
   status: null,
   recognition: null,
 };
@@ -49,6 +52,9 @@ const els = {
   memoryButton: document.querySelector("#memoryButton"),
   missionList: document.querySelector("#missionList"),
   memoryList: document.querySelector("#memoryList"),
+  actionGrid: document.querySelector("#actionGrid"),
+  actionOutput: document.querySelector("#actionOutput"),
+  auditList: document.querySelector("#auditList"),
   diagnostics: document.querySelector("#diagnostics"),
   field: document.querySelector("#field"),
 };
@@ -75,6 +81,7 @@ function renderAll() {
   renderTranscript();
   renderMissions();
   renderMemories();
+  renderActions();
   renderDiagnostics();
   els.modeLabel.textContent = `${state.mode} mode`;
   els.memoryMetric.textContent = String(state.memories.length);
@@ -109,6 +116,10 @@ function renderMissions() {
           <strong>${escapeHtml(mission.title)}</strong>
           <span>${escapeHtml(mission.status)} / ${escapeHtml(mission.priority)}</span>
           <div class="tag">${escapeHtml(mission.source || "local")}</div>
+          <div class="item-actions">
+            <button data-mission-action="active" data-mission-id="${escapeHtml(mission.id || "")}">Active</button>
+            <button data-mission-action="complete" data-mission-id="${escapeHtml(mission.id || "")}">Done</button>
+          </div>
         </article>
       `,
     )
@@ -131,6 +142,80 @@ function renderMemories() {
       `,
     )
     .join("");
+}
+
+function renderActions() {
+  const actions = state.actions.length
+    ? state.actions
+    : [
+        { id: "workspace_snapshot", label: "Workspace Snapshot", description: "Inspect project files." },
+        { id: "git_status", label: "Git Status", description: "Inspect branch state." },
+        { id: "ue_readiness", label: "UE5 Readiness", description: "Check Unreal layout." },
+        { id: "memory_digest", label: "Memory Digest", description: "Summarize local state." },
+      ];
+  els.actionGrid.innerHTML = actions
+    .map(
+      (action) => `
+        <button class="action-button" data-action-id="${escapeHtml(action.id)}" title="${escapeHtml(action.description || "")}">
+          <strong>${escapeHtml(action.label || action.id)}</strong>
+          <span>${escapeHtml(action.risk || "read-only")}</span>
+        </button>
+      `,
+    )
+    .join("");
+
+  if (state.lastAction?.result) {
+    const result = state.lastAction.result;
+    const body = summarizeActionResult(result);
+    els.actionOutput.innerHTML = `
+      <strong>${escapeHtml(result.title || "Action result")}</strong>
+      <p>${escapeHtml(result.summary || "Completed.")}</p>
+      <pre>${escapeHtml(body)}</pre>
+    `;
+  }
+
+  if (!state.actionLog.length) {
+    els.auditList.innerHTML = `<div class="audit-row"><span>No audits yet</span><b>ready</b></div>`;
+    return;
+  }
+  els.auditList.innerHTML = state.actionLog
+    .slice(0, 4)
+    .map(
+      (entry) => `
+        <div class="audit-row">
+          <span>${escapeHtml(entry.action_id || "action")}</span>
+          <b>${escapeHtml(entry.status || "ok")}</b>
+        </div>
+      `,
+    )
+    .join("");
+}
+
+function summarizeActionResult(result) {
+  if (result.files) {
+    return result.files
+      .slice(0, 16)
+      .map((file) => `${file.path} (${Math.ceil((file.size || 0) / 1024)} KB)`)
+      .join("\n");
+  }
+  if (result.status || result.recent_commits || result.remotes) {
+    return [
+      result.status?.output || "",
+      result.recent_commits?.output || "",
+      result.remotes?.output || "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+  if (result.checks) {
+    return result.checks.map((check) => `${check.ok ? "OK" : "CHECK"} ${check.name}: ${check.detail}`).join("\n");
+  }
+  if (result.memories || result.missions) {
+    const memories = (result.memories || []).map((memory) => `MEM ${memory.title}: ${memory.body}`);
+    const missions = (result.missions || []).map((mission) => `MISSION ${mission.status}: ${mission.title}`);
+    return [...memories, ...missions].slice(0, 16).join("\n");
+  }
+  return JSON.stringify(result, null, 2);
 }
 
 function renderDiagnostics() {
@@ -160,6 +245,8 @@ function applyServerState(payload) {
   state.transcript = payload.conversation || [];
   state.memories = payload.memories || [];
   state.missions = payload.missions || [];
+  state.actions = payload.actions || state.actions;
+  state.actionLog = payload.action_log || state.actionLog;
   setOnline(true);
   renderAll();
 }
@@ -189,7 +276,7 @@ function loadFallbackState() {
     { title: "Start local Python core", status: "pending", priority: "high", source: "browser" },
   ];
   state.status = {
-    version: "0.1.0",
+    version: "1.0.0",
     uptime_seconds: 0,
     python: "offline",
     host: "browser",
@@ -197,6 +284,13 @@ function loadFallbackState() {
     workspace: "not connected",
     tool_policy: "safe-actions-only",
   };
+  state.actions = [
+    { id: "workspace_snapshot", label: "Workspace Snapshot", risk: "server required" },
+    { id: "git_status", label: "Git Status", risk: "server required" },
+    { id: "ue_readiness", label: "UE5 Readiness", risk: "server required" },
+    { id: "memory_digest", label: "Memory Digest", risk: "browser" },
+  ];
+  state.actionLog = saved.actionLog || [];
 }
 
 function saveFallbackState() {
@@ -206,6 +300,7 @@ function saveFallbackState() {
       transcript: state.transcript.slice(-40),
       memories: state.memories.slice(0, 20),
       missions: state.missions.slice(0, 20),
+      actionLog: state.actionLog.slice(0, 20),
     }),
   );
 }
@@ -318,6 +413,19 @@ async function createManualMission() {
   applyServerState(payload.state);
 }
 
+async function updateMissionStatus(id, status) {
+  if (!id) return;
+  if (!state.online) {
+    const mission = state.missions.find((item) => item.id === id);
+    if (mission) mission.status = status;
+    saveFallbackState();
+    renderAll();
+    return;
+  }
+  const payload = await api.post("/api/mission/update", { id, status });
+  applyServerState(payload.state);
+}
+
 async function saveManualMemory() {
   const body = els.promptInput.value.trim();
   if (!body) return;
@@ -329,6 +437,36 @@ async function saveManualMemory() {
   }
   const payload = await api.post("/api/memory", { title: body.slice(0, 90), body });
   applyServerState(payload.state);
+}
+
+async function runSafeAction(actionId) {
+  if (!actionId) return;
+  els.actionOutput.innerHTML = `<strong>Running ${escapeHtml(actionId)}</strong><p>Inspecting local state...</p>`;
+  if (!state.online) {
+    state.lastAction = {
+      result: {
+        title: "Server Required",
+        summary: "Start the Python core to run local safe actions.",
+      },
+    };
+    state.actionLog.unshift({ action_id: actionId, status: "offline" });
+    saveFallbackState();
+    renderAll();
+    return;
+  }
+  try {
+    const payload = await api.post("/api/action", { action_id: actionId });
+    state.lastAction = payload.action;
+    applyServerState(payload.state);
+  } catch (error) {
+    state.lastAction = {
+      result: {
+        title: "Action Fault",
+        summary: error.message,
+      },
+    };
+    renderAll();
+  }
 }
 
 function setupEvents() {
@@ -354,6 +492,16 @@ function setupEvents() {
 
   document.querySelectorAll(".quickbar button").forEach((button) => {
     button.addEventListener("click", () => sendMessage(button.dataset.prompt || ""));
+  });
+
+  els.actionGrid.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-action-id]");
+    if (button) runSafeAction(button.dataset.actionId);
+  });
+
+  els.missionList.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-mission-action]");
+    if (button) updateMissionStatus(button.dataset.missionId, button.dataset.missionAction);
   });
 
   els.listenButton.addEventListener("click", () => {

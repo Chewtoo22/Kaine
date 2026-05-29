@@ -5,6 +5,12 @@ Kaine is a local-first AI command center inspired by cinematic personal assistan
 ## Run
 
 ```powershell
+.\Start-Kaine.ps1
+```
+
+Or run the server directly:
+
+```powershell
 python .\kaine_server.py
 ```
 
@@ -14,7 +20,7 @@ Then open:
 http://127.0.0.1:8766
 ```
 
-The app runs without API keys. The first slice includes a local reasoning fallback, durable memory in `data/kaine_state.json`, voice input/output where the browser supports it, and a safe project/status action layer.
+The app runs without API keys. The finished MVP includes a local reasoning fallback, durable memory in `data/kaine_state.json`, mission lifecycle controls, voice input/output where the browser supports it, and an allowlisted read-only action layer for project inspection.
 
 ## Unreal Rebuild
 
@@ -46,11 +52,12 @@ python -m py_compile .\kaine_server.py
 - Live assistant UI with animated Kaine identity core.
 - Chat with operator, engineer, security, strategy, and creative modes.
 - Local memory capture from explicit "remember..." prompts.
-- Mission queue generation for build and planning requests.
-- Safe project snapshot and runtime status APIs.
+- Mission queue generation plus active/complete mission status controls.
+- Safe project snapshot, Git status, UE5 readiness, memory digest, and runtime status actions.
+- Audited action history in local state.
 - Browser speech synthesis and speech recognition hooks with graceful fallback.
 - Native Unreal Engine 5.7 photoreal-style command lab in `KaineUE5/`.
 
 ## Scope
 
-This is the foundation slice. It is intentionally secure-by-default: Kaine does not execute arbitrary commands yet. Future tool execution should require explicit allowlists, confirmations, logs, and scoped workspace permissions.
+This is the finished local MVP. It is intentionally secure-by-default: Kaine exposes allowlisted read-only actions, logs every action invocation, and does not expose arbitrary shell execution from the UI or API. Future write-capable tools should require explicit allowlists, confirmations, logs, and scoped workspace permissions.

@@ -7,8 +7,8 @@ Kaine is a local-first AI operator: a desktop-grade command center that can reas
 The first version prioritizes four qualities:
 
 - Presence: Kaine has a visible identity, live state, and speech-synced animation.
-- Utility: Kaine can answer, plan, capture memory, and inspect its own project state without external services.
-- Safety: Tool execution starts with safe, read-only actions. Destructive or external actions are out of scope until policy gates exist.
+- Utility: Kaine can answer, plan, capture memory, manage missions, and inspect its own project state without external services.
+- Safety: Tool execution is limited to allowlisted read-only actions with local audit records. Destructive or external actions are out of scope until policy gates exist.
 - Extensibility: The server and UI are small enough to understand, but separated enough to grow into providers, plugins, and desktop packaging.
 
 ## Runtime Shape
@@ -55,7 +55,7 @@ Located in `web/`.
 - `styles.css`: Visual system, responsive layout, animated identity core.
 - `app.js`: State management, chat transport, voice hooks, canvas field, and DOM updates.
 
-The UI is built as the first screen, not a landing page. It exposes the core workflows directly: chat, mode selection, mission queue, memory, diagnostics, and voice state.
+The UI is built as the first screen, not a landing page. It exposes the core workflows directly: chat, mode selection, mission queue, mission completion, memory, safe actions, diagnostics, and voice state.
 
 ### Server
 
@@ -64,6 +64,7 @@ Located in `kaine_server.py`.
 - Serves static frontend files.
 - Exposes JSON APIs under `/api`.
 - Persists memories, missions, and conversation history.
+- Persists action audit entries for every safe action invocation.
 - Provides a deterministic local fallback brain so first launch works without credentials.
 
 ### Persistence
@@ -72,22 +73,25 @@ Stored at `data/kaine_state.json` by default. This path is ignored by Git becaus
 
 ### Safe Actions
 
-The first slice supports read-only introspection:
+The MVP supports read-only introspection through an explicit action catalog:
 
-- Server uptime and environment status.
-- Workspace file summary.
-- Mission creation from user prompts.
-- Memory capture from explicit user intent.
+- `workspace_snapshot`: lists project source files while excluding generated output.
+- `git_status`: runs fixed read-only Git status/log/remote inspections.
+- `ue_readiness`: checks the Unreal source layout and latest standalone runtime marker.
+- `memory_digest`: summarizes local memory, mission, and action-audit state.
 
-Arbitrary shell commands are intentionally not exposed in the UI or API yet.
+Every action writes a compact audit entry to local state. Arbitrary shell commands are intentionally not exposed in the UI or API.
 
 ## API Surface
 
 - `GET /api/status`: Runtime status, uptime, version, and safe environment summary.
 - `GET /api/state`: Current conversation tail, memories, missions, and status.
+- `GET /api/actions`: Allowlisted safe action catalog and recent audit entries.
 - `POST /api/chat`: Send a message and receive Kaine's response.
+- `POST /api/action`: Run one allowlisted read-only safe action.
 - `POST /api/memory`: Save an explicit memory.
 - `POST /api/mission`: Create a mission manually.
+- `POST /api/mission/update`: Update mission status, priority, or title.
 
 ## Assistant Modes
 
@@ -100,7 +104,7 @@ Arbitrary shell commands are intentionally not exposed in the UI or API yet.
 ## Growth Path
 
 1. Add provider adapters for local models and cloud LLMs behind a single interface.
-2. Add a permissioned tool registry with allowlists, dry runs, and audit logs.
+2. Add approval-gated write-capable tools with dry runs and rollback metadata.
 3. Package as a desktop app after the web/server slice stabilizes.
 4. Add project indexing and semantic memory.
 5. Add phone companion over authenticated LAN APIs.

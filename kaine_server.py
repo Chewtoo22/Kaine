@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -22,9 +23,10 @@ from uuid import uuid4
 
 
 APP_NAME = "Kaine"
-APP_VERSION = "0.1.0"
+APP_VERSION = "1.0.0"
 MAX_BODY_BYTES = 64 * 1024
 MAX_MESSAGE_CHARS = 4000
+SAFE_ACTION_TIMEOUT_SECONDS = 4
 
 
 def utc_now() -> str:
@@ -84,6 +86,7 @@ class KaineStore:
                     "created_at": now,
                 },
             ],
+            "action_log": [],
         }
 
     def _load(self) -> dict[str, Any]:
@@ -113,8 +116,9 @@ class KaineStore:
         state.setdefault("conversation", [])
         state.setdefault("memories", [])
         state.setdefault("missions", [])
+        state.setdefault("action_log", [])
         state["profile"].setdefault("name", APP_NAME)
-        state["profile"].setdefault("version", APP_VERSION)
+        state["profile"]["version"] = APP_VERSION
         return state
 
     def _write_state(self, state: dict[str, Any]) -> None:
@@ -138,6 +142,42 @@ class KaineStore:
         with self._lock:
             self._state["conversation"].append(entry)
             self._state["conversation"] = self._state["conversation"][-120:]
+            self._write_state(self._state)
+        return entry
+
+    def update_mission(
+        self,
+        mission_id: str,
+        status: str | None = None,
+        priority: str | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            for mission in self._state["missions"]:
+                if mission.get("id") != mission_id:
+                    continue
+                if status is not None:
+                    mission["status"] = clean_text(status, 40) or mission.get("status", "active")
+                if priority is not None:
+                    mission["priority"] = clean_text(priority, 40) or mission.get("priority", "normal")
+                if title is not None:
+                    mission["title"] = clean_text(title, 160) or mission.get("title", "Untitled mission")
+                mission["updated_at"] = utc_now()
+                self._write_state(self._state)
+                return dict(mission)
+        return None
+
+    def record_action(self, action_id: str, status: str, summary: str) -> dict[str, Any]:
+        entry = {
+            "id": slug_id("act"),
+            "action_id": clean_text(action_id, 80),
+            "status": clean_text(status, 40),
+            "summary": clean_text(summary, 240),
+            "created_at": utc_now(),
+        }
+        with self._lock:
+            self._state["action_log"].insert(0, entry)
+            self._state["action_log"] = self._state["action_log"][:100]
             self._write_state(self._state)
         return entry
 
@@ -278,7 +318,8 @@ class KaineBrain:
             f"Workspace items visible: {files['count']}. "
             f"Memories: {len(state.get('memories', []))}. "
             f"Missions: {len(state.get('missions', []))}. "
-            "Tool policy: safe actions only; arbitrary command execution is locked."
+            f"Safe action audits: {len(state.get('action_log', []))}. "
+            "Tool policy: allowlisted read-only actions only; arbitrary command execution is locked."
         )
 
     def _security_reply(self, text: str) -> str:
@@ -321,7 +362,7 @@ class KaineBrain:
     def _help_reply(self) -> str:
         return (
             "Available directives: ask for status, switch modes, create a mission, say 'remember that ...', "
-            "request an implementation plan, or ask for a security pass. Voice output and browser speech input "
+            "run a safe action, request an implementation plan, or ask for a security pass. Voice output and browser speech input "
             "are controlled from the interface."
         )
 
@@ -426,6 +467,165 @@ def safe_workspace_summary(root: Path) -> dict[str, Any]:
         return {"count": 0, "entries": []}
 
 
+def safe_file_manifest(root: Path, max_files: int = 120) -> list[dict[str, Any]]:
+    ignored_dirs = {
+        ".git",
+        ".venv",
+        "__pycache__",
+        ".pytest_cache",
+        "Binaries",
+        "DerivedDataCache",
+        "Intermediate",
+        "Saved",
+        "data",
+        "logs",
+        "node_modules",
+    }
+    manifest: list[dict[str, Any]] = []
+    try:
+        for path in sorted(root.rglob("*"), key=lambda item: str(item).lower()):
+            if len(manifest) >= max_files:
+                break
+            if any(part in ignored_dirs for part in path.relative_to(root).parts):
+                continue
+            if path.is_dir():
+                continue
+            relative = path.relative_to(root).as_posix()
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            manifest.append(
+                {
+                    "path": relative,
+                    "size": stat.st_size,
+                    "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds"),
+                }
+            )
+    except OSError:
+        return []
+    return manifest
+
+
+def run_git_readonly(root: Path, args: list[str]) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=SAFE_ACTION_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "output": "", "error": str(exc)}
+    output = (completed.stdout or completed.stderr or "").strip()
+    return {"ok": completed.returncode == 0, "output": output[:6000], "error": "" if completed.returncode == 0 else output[:1000]}
+
+
+def action_catalog() -> list[dict[str, str]]:
+    return [
+        {
+            "id": "workspace_snapshot",
+            "label": "Workspace Snapshot",
+            "description": "List tracked project source files and top-level workspace items.",
+            "risk": "read-only",
+        },
+        {
+            "id": "git_status",
+            "label": "Git Status",
+            "description": "Inspect branch, remote, recent commits, and uncommitted files.",
+            "risk": "read-only",
+        },
+        {
+            "id": "ue_readiness",
+            "label": "UE5 Readiness",
+            "description": "Check the Unreal project layout and latest standalone launch marker.",
+            "risk": "read-only",
+        },
+        {
+            "id": "memory_digest",
+            "label": "Memory Digest",
+            "description": "Summarize saved memories, missions, and recent safe actions.",
+            "risk": "read-only",
+        },
+    ]
+
+
+def run_safe_action(action_id: str, context: RuntimeContext, store: KaineStore) -> dict[str, Any]:
+    action_id = clean_text(action_id, 80)
+    root = context.root
+    state = store.snapshot()
+
+    if action_id == "workspace_snapshot":
+        manifest = safe_file_manifest(root)
+        result = {
+            "title": "Workspace Snapshot",
+            "summary": f"{len(manifest)} source files visible; generated output is excluded.",
+            "workspace": str(root),
+            "top_level": safe_workspace_summary(root)["entries"],
+            "files": manifest,
+        }
+    elif action_id == "git_status":
+        status = run_git_readonly(root, ["status", "--short", "--branch"])
+        log = run_git_readonly(root, ["log", "--oneline", "--decorate", "--max-count=6"])
+        remote = run_git_readonly(root, ["remote", "-v"])
+        result = {
+            "title": "Git Status",
+            "summary": "Git repository inspected with read-only commands.",
+            "status": status,
+            "recent_commits": log,
+            "remotes": remote,
+        }
+    elif action_id == "ue_readiness":
+        project = root / "KaineUE5" / "KaineUE5.uproject"
+        source_dir = root / "KaineUE5" / "Source" / "KaineUE5"
+        log_path = root / "KaineUE5" / "Saved" / "Logs" / "StandaloneGame.log"
+        marker = ""
+        if log_path.exists():
+            try:
+                lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                marker = next((line for line in reversed(lines) if "Kaine polished UI scene spawned" in line), "")
+            except OSError:
+                marker = ""
+        checks = [
+            {"name": "uproject", "ok": project.exists(), "detail": project.as_posix()},
+            {"name": "source", "ok": source_dir.exists(), "detail": source_dir.as_posix()},
+            {"name": "renderer_config", "ok": (root / "KaineUE5" / "Config" / "DefaultEngine.ini").exists(), "detail": "DefaultEngine.ini"},
+            {"name": "latest_runtime_marker", "ok": bool(marker), "detail": marker or "Run standalone once to refresh this marker."},
+        ]
+        ready = all(check["ok"] for check in checks[:3])
+        result = {
+            "title": "UE5 Readiness",
+            "summary": "UE5 source layout is ready." if ready else "UE5 source layout needs attention.",
+            "checks": checks,
+        }
+    elif action_id == "memory_digest":
+        memories = state.get("memories", [])[:8]
+        missions = state.get("missions", [])[:8]
+        action_log = state.get("action_log", [])[:8]
+        result = {
+            "title": "Memory Digest",
+            "summary": f"{len(state.get('memories', []))} memories, {len(state.get('missions', []))} missions, {len(state.get('action_log', []))} audited actions.",
+            "memories": memories,
+            "missions": missions,
+            "action_log": action_log,
+        }
+    else:
+        return {
+            "ok": False,
+            "error": "unknown action",
+            "catalog": action_catalog(),
+        }
+
+    return {
+        "ok": True,
+        "action_id": action_id,
+        "ran_at": utc_now(),
+        "result": result,
+    }
+
+
 def build_status(context: RuntimeContext, store: KaineStore) -> dict[str, Any]:
     state = store.snapshot()
     return {
@@ -444,7 +644,9 @@ def build_status(context: RuntimeContext, store: KaineStore) -> dict[str, Any]:
         "workspace_summary": safe_workspace_summary(context.root),
         "memory_count": len(state.get("memories", [])),
         "mission_count": len(state.get("missions", [])),
+        "action_count": len(state.get("action_log", [])),
         "tool_policy": "safe-actions-only",
+        "available_actions": [action["id"] for action in action_catalog()],
     }
 
 
@@ -456,6 +658,8 @@ def state_payload(context: RuntimeContext, store: KaineStore) -> dict[str, Any]:
         "conversation": state.get("conversation", [])[-40:],
         "memories": state.get("memories", [])[:20],
         "missions": state.get("missions", [])[:20],
+        "action_log": state.get("action_log", [])[:20],
+        "actions": action_catalog(),
     }
 
 
@@ -474,6 +678,9 @@ def make_handler(context: RuntimeContext, store: KaineStore, brain: KaineBrain):
             if parsed.path == "/api/state":
                 self._json(state_payload(context, store))
                 return
+            if parsed.path == "/api/actions":
+                self._json({"actions": action_catalog(), "action_log": store.snapshot().get("action_log", [])[:20]})
+                return
             self._serve_static(parsed.path)
 
         def do_POST(self) -> None:
@@ -486,6 +693,12 @@ def make_handler(context: RuntimeContext, store: KaineStore, brain: KaineBrain):
                 return
             if parsed.path == "/api/mission":
                 self._handle_mission()
+                return
+            if parsed.path == "/api/mission/update":
+                self._handle_mission_update()
+                return
+            if parsed.path == "/api/action":
+                self._handle_action()
                 return
             self._json({"error": "unknown endpoint"}, HTTPStatus.NOT_FOUND)
 
@@ -532,6 +745,42 @@ def make_handler(context: RuntimeContext, store: KaineStore, brain: KaineBrain):
                 source=clean_text(payload.get("source"), 80) or "manual",
             )
             self._json({"mission": mission, "state": state_payload(context, store)}, HTTPStatus.CREATED)
+
+        def _handle_mission_update(self) -> None:
+            payload = self._read_json()
+            mission_id = clean_text(payload.get("id"), 80)
+            if not mission_id:
+                self._json({"error": "id is required"}, HTTPStatus.BAD_REQUEST)
+                return
+            mission = store.update_mission(
+                mission_id,
+                status=clean_text(payload.get("status"), 40) or None,
+                priority=clean_text(payload.get("priority"), 40) or None,
+                title=clean_text(payload.get("title"), 160) or None,
+            )
+            if mission is None:
+                self._json({"error": "mission not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self._json({"mission": mission, "state": state_payload(context, store)})
+
+        def _handle_action(self) -> None:
+            payload = self._read_json()
+            action_id = clean_text(payload.get("action_id"), 80)
+            if not action_id:
+                self._json({"error": "action_id is required", "actions": action_catalog()}, HTTPStatus.BAD_REQUEST)
+                return
+            result = run_safe_action(action_id, context, store)
+            status = "ok" if result.get("ok") else "error"
+            summary = result.get("result", {}).get("summary") or result.get("error", "Action failed.")
+            audit = store.record_action(action_id, status, summary)
+            self._json(
+                {
+                    "action": result,
+                    "audit": audit,
+                    "state": state_payload(context, store),
+                },
+                HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST,
+            )
 
         def _read_json(self) -> dict[str, Any]:
             try:

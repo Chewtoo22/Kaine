@@ -70,6 +70,21 @@ class KaineServerTests(unittest.TestCase):
         self.assertEqual(payload["mission"]["title"], "Add permissioned project tools")
         self.assertEqual(payload["mission"]["priority"], "high")
 
+    def test_safe_action_records_audit_entry(self):
+        payload = self.post_json("/api/action", {"action_id": "workspace_snapshot"})
+        self.assertTrue(payload["action"]["ok"])
+        self.assertEqual(payload["audit"]["action_id"], "workspace_snapshot")
+        self.assertGreaterEqual(len(payload["state"]["action_log"]), 1)
+
+    def test_mission_status_can_be_updated(self):
+        created = self.post_json(
+            "/api/mission",
+            {"title": "Verify final Kaine flow", "priority": "high", "source": "test"},
+        )
+        mission_id = created["mission"]["id"]
+        updated = self.post_json("/api/mission/update", {"id": mission_id, "status": "complete"})
+        self.assertEqual(updated["mission"]["status"], "complete")
+
 
 if __name__ == "__main__":
     unittest.main()
