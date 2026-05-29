@@ -1,0 +1,1 @@
+Optimized launcher for RTX 4070 with best Ollama env vars
