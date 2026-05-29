@@ -1,0 +1,1 @@
+HUD streaming enhancements that make the holographic core react during generation
